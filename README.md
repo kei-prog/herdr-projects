@@ -113,6 +113,15 @@ It runs the `herdr-projects` binary every turn, so you'll want to allow-list it 
 
 No. A project is a folder on your machine, the plugin talks to your local Herdr session, and remote threads use your own SSH machines. Your agent CLI still uses its own service as usual.
 
+### How are local worktree threads grouped?
+
+Local worktree threads open as ordinary Herdr Spaces so each stays with its own
+project, even when multiple projects use the same repository. Git worktrees and
+branches remain isolated; checkouts live under `<projects-root>/.worktrees/<slug>/<thread-id>`.
+These Spaces do not use Herdr's repository worktree grouping. Existing open
+threads keep their placement; reopening a closed local thread uses the new
+placement. Remote threads continue to use Herdr's worktree Spaces.
+
 ### Will it touch my branches or worktrees on its own?
 
 Only to clean up after a thread is resolved, which happens when you resolve it, when its pull request is merged, or after `auto_resolve_days` idle. Then it removes the thread's worktree (never with force, so uncommitted changes keep it) and, only if the pull request is merged, the local branch. The thread's report and files are copied home first and always kept. It never merges or pushes itself: a merge happens when you send a thread its own "Merge the PR" line and the thread does it with its own tools.

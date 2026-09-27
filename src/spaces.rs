@@ -36,7 +36,7 @@ fn local_worktree(t: &Thread) -> bool {
 /// yet: threads placed before this was recorded, or placed while herdr was
 /// slow to list it.
 pub fn record(project: &Project, herdr: &Herdr) {
-    let missing: Vec<Thread> = thread::list(project).into_iter().filter(|t| t.status != Status::Resolved && local_worktree(t) && t.repo_workspace.is_empty()).collect();
+    let missing: Vec<Thread> = thread::list(project).into_iter().filter(|t| t.status != Status::Resolved && local_worktree(t) && !t.plain_workspace && t.repo_workspace.is_empty()).collect();
     if missing.is_empty() {
         return;
     }

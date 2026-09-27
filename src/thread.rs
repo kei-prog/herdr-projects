@@ -69,6 +69,8 @@ pub struct Thread {
     pub base: String,
     pub machine: String,
     pub worktree_path: String,
+    /// Local worktree opened as a plain Space, outside Herdr repo grouping.
+    pub plain_workspace: bool,
     pub thread_dir: String,
     pub workspace_id: String,
     /// The repository's primary Space herdr grouped this worktree under

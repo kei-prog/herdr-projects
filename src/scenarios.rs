@@ -142,8 +142,8 @@ fn socket_of(cmd: &Cmd) -> String {
 fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() {
     let world = World::new();
     let project = world.project("demo", "a.sock");
-    let worktree = world.home.path().join("wt");
-    std::fs::create_dir(&worktree).unwrap();
+    let worktree = project.root.join(".worktrees/demo/t-0001");
+    std::fs::create_dir_all(&worktree).unwrap();
     let repo = world.home.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
     let wt = worktree.to_string_lossy().into_owned();
@@ -153,9 +153,10 @@ fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() 
     world.runner.on("remote get-url origin", ok("git@github.com:Owner/App.git\n"));
     world.runner.on("fetch origin", fail(1, "offline"));
     world.runner.on("symbolic-ref", ok("origin/main\n"));
+    world.runner.on("worktree add", ok(""));
     world.runner.on("rev-parse --git-path", fail(1, "not a repo"));
     world.runner.on(
-        "worktree create",
+        "workspace create",
         ok(&format!(
             r#"{{"result":{{"root_pane":{{"workspace_id":"w2","tab_id":"w2:t1","pane_id":"w2:p1","cwd":"{wt}"}},"worktree":{{"path":"{wt}"}}}}}}"#
         )),
@@ -184,6 +185,10 @@ fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() 
     // A failed fetch is a warning; nothing was launched.
     assert_eq!(world.runner.count("agent start"), 0);
     assert_eq!(started.status, Status::Open);
+    assert!(started.plain_workspace);
+    assert!(started.repo_workspace.is_empty());
+    assert_eq!(world.runner.count("worktree create"), 0);
+    assert_eq!(world.runner.count("worktree add -b hp/demo/t-0001-fix-it"), 1);
     assert!(started.prompt_pending);
     assert_eq!(started.branch, "hp/demo/t-0001-fix-it");
     assert_eq!(started.base, "origin/main");
@@ -194,7 +199,7 @@ fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() 
     assert!(brief.contains("# Project instructions"));
     // The hostile title reaches herdr as one argument, unchanged.
     let calls = world.runner.calls.borrow();
-    let create = calls.iter().find(|c| c.display().contains("worktree create")).unwrap();
+    let create = calls.iter().find(|c| c.display().contains("workspace create")).unwrap();
     assert!(create.args.contains(&"Fix $(it)".to_string()));
     drop(calls);
 
@@ -2383,4 +2388,124 @@ fn thread_brief_delivers_a_pending_brief_once_and_only_to_a_ready_agent() {
     threads::brief(&ctx, "demo", "t-0001").unwrap();
     ticker::tick_project(&ctx, &project).unwrap();
     assert_eq!(world.runner.count("agent prompt"), 1);
+}
+
+#[test]
+fn local_worktree_reopens_as_a_plain_space_and_keeps_legacy_records_readable() {
+    for plain in [false, true] {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let worktree = world.home.path().join("checkout");
+        std::fs::create_dir(&worktree).unwrap();
+        world.thread(&project, &worktree, |t| {
+            t.plain_workspace = plain;
+            t.repo_workspace = "w9".into();
+        });
+        std::fs::write(thread::task_path(&project, "t-0001"), "The task.").unwrap();
+        world.runner.on("rev-parse --git-path", fail(1, "not a repo"));
+        world.runner.on("workspace create", ok(r#"{"result":{"root_pane":{"workspace_id":"w3","tab_id":"w3:t1","pane_id":"w3:p1"}}}"#));
+        let t = threads::restart(&world.ctx(), "demo", "t-0001", None).unwrap();
+        assert!(t.plain_workspace);
+        assert!(t.repo_workspace.is_empty());
+        assert_eq!(t.workspace_id, "w3");
+        assert_eq!(t.worktree_path, worktree.to_string_lossy());
+        assert_eq!(world.runner.count("worktree open"), 0);
+        assert_eq!(world.runner.count("worktree add"), 0);
+        assert_eq!(world.runner.count("workspace create"), 1);
+    }
+}
+
+#[test]
+fn plain_worktree_removal_preserves_dirty_checkout_and_closes_only_after_git_succeeds() {
+    use crate::runner::{RealRunner, Runner};
+    for dirty in [true, false] {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let repo = world.home.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "--allow-empty", "-m", "initial"]);
+        let path = world.home.path().join("checkout");
+        git(&["worktree", "add", "-b", "test-thread", path.to_str().unwrap()]);
+        if dirty {
+            std::fs::write(path.join("uncommitted.txt"), "keep me").unwrap();
+        }
+        let t = world.thread(&project, &path, |t| {
+            t.repo = repo.to_string_lossy().into_owned();
+            t.plain_workspace = true;
+        });
+        *world.panes.borrow_mut() = format!("[{}]", pane_json("w2", "w2:t1", "w2:p1", path.to_str().unwrap()));
+        world.runner.on_fn(|cmd| cmd.program == "git", |cmd| RealRunner.run(cmd));
+        world.runner.on("workspace close", ok(r#"{"result":{}}"#));
+        let ctx = world.ctx();
+        let view = threads::session_view(&ctx, &project).unwrap();
+        let result = threads::remove_worktree(&ctx, &project, &t, Some(&view));
+        assert_eq!(result.is_ok(), !dirty);
+        assert_eq!(path.exists(), dirty);
+        assert_eq!(world.runner.count("workspace close w2"), usize::from(!dirty));
+        assert_eq!(world.runner.count("worktree remove --workspace"), 0);
+        if dirty {
+            assert_eq!(std::fs::read_to_string(path.join("uncommitted.txt")).unwrap(), "keep me");
+        }
+    }
+}
+
+#[test]
+fn plain_worktree_does_not_acquire_another_projects_primary_space() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    world.thread(&project, world.home.path(), |t| t.plain_workspace = true);
+    world.runner.on("workspace list", ok(r#"{"result":{"workspaces":[{"workspace_id":"w9","worktree":{"repo_key":"/repo/.git","checkout_path":"/repo","is_linked_worktree":false}}]}}"#));
+    let ctx = world.ctx();
+    let view = threads::session_view(&ctx, &project).unwrap();
+    crate::spaces::record(&project, &view.herdr);
+    assert!(thread::load(&project, "t-0001").unwrap().repo_workspace.is_empty());
+}
+
+#[test]
+fn projects_sharing_a_repo_create_separate_worktrees_and_retry_failed_space_creation() {
+    use crate::runner::{RealRunner, Runner};
+    let world = World::new();
+    let repo = world.home.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [vec!["init", "-q"], vec!["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "--allow-empty", "-m", "initial"]] {
+        let out = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    world.runner.on_fn(|cmd| cmd.program == "git", |cmd| RealRunner.run(cmd));
+    let attempts = Rc::new(RefCell::new(0));
+    world.runner.on_fn(|cmd| cmd.display().contains("workspace create"), move |_| {
+        *attempts.borrow_mut() += 1;
+        let n = *attempts.borrow();
+        if n == 1 { return Ok(fail(1, "temporarily unavailable")); }
+        Ok(ok(&format!(r#"{{"result":{{"root_pane":{{"workspace_id":"w{n}","tab_id":"w{n}:t1","pane_id":"w{n}:p1"}}}}}}"#)))
+    });
+    let mut started = Vec::new();
+    for slug in ["alpha", "beta"] {
+        let project = world.project(slug, "a.sock");
+        let result = threads::start(&world.ctx(), slug, StartArgs {
+            title: "Same task".into(), repo: Some(repo.to_string_lossy().into_owned()),
+            machine: None, profile: None, kind: None, base: Some("HEAD".into()), task: "The task.".into(),
+        });
+        let t = if slug == "alpha" {
+            assert!(result.is_err());
+            let failed = thread::load(&project, "t-0001").unwrap();
+            assert!(Path::new(&failed.worktree_path).is_dir());
+            assert!(failed.plain_workspace);
+            threads::restart(&world.ctx(), slug, "t-0001", None).unwrap()
+        } else { result.unwrap() };
+        assert!(t.plain_workspace);
+        assert!(t.repo_workspace.is_empty());
+        assert!(Path::new(&t.thread_dir).join("brief.md").is_file());
+        started.push(t);
+    }
+    assert_ne!(started[0].worktree_path, started[1].worktree_path);
+    assert_ne!(started[0].workspace_id, started[1].workspace_id);
+    assert_ne!(started[0].branch, started[1].branch);
+    assert_eq!(world.runner.count("worktree add"), 2);
+    assert_eq!(world.runner.count("worktree create"), 0);
 }

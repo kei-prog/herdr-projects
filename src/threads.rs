@@ -219,21 +219,22 @@ fn place_and_brief(ctx: &Ctx, project: &Project, view: &SessionView, id: &str, r
                 record.base.clone()
             };
             let branch = thread::branch_name(slug, id, &record.title);
-            let (created, path, cwd) = view.herdr.worktree_create(&record.repo, &branch, &base, &record.title)?;
-            let repo_workspace = repo_space(&view.herdr, &record.repo);
-            // Recorded immediately, so a command killed midway still leaves a
-            // record `thread restart` can act on.
+            let parent = project.root.join(".worktrees").join(slug);
+            std::fs::create_dir_all(&parent)?;
+            let path = parent.canonicalize()?.join(id).to_string_lossy().into_owned();
+            git(runner, &record.repo, &["worktree", "add", "-b", &branch, &path, &base], Duration::from_secs(20))?;
+            // Save the checkout before opening its Space so a failed open can
+            // be retried without creating a second branch or worktree.
             thread::update(project, id, |t| {
-                t.repo_workspace = repo_workspace;
                 t.origin = origin;
                 t.base = base;
                 t.branch = branch;
-                t.worktree_path = path;
-                t.cwd = cwd;
-                t.workspace_id = created.workspace_id;
-                t.tab_id = created.tab_id;
-                t.pane_id = created.pane_id;
-            })?
+                t.worktree_path = path.clone();
+                t.cwd = path;
+                t.plain_workspace = true;
+                t.repo_workspace.clear();
+            })?;
+            open_local_worktree(project, &view.herdr, id)?
         }
         Kind::Tab | Kind::Checkout => place_tab(project, view, &record)?,
         Kind::Adopted => bail!("an adopted thread is not placed by the binary"),
@@ -242,10 +243,22 @@ fn place_and_brief(ctx: &Ctx, project: &Project, view: &SessionView, id: &str, r
     finish_placement(project, view, id)
 }
 
-/// The repository's primary Space herdr grouped a new worktree Space under,
-/// or "" when herdr does not list one (the ticker looks again).
-fn repo_space(herdr: &crate::herdr::Herdr, repo: &str) -> String {
-    herdr.workspace_list().ok().and_then(|all| crate::spaces::primary(&all, repo).map(|w| w.workspace_id.clone())).unwrap_or_default()
+/// Plain Spaces follow project ordering instead of Herdr's repo grouping.
+fn open_local_worktree(project: &Project, herdr: &Herdr, id: &str) -> Result<Thread> {
+    let record = thread::load(project, id)?;
+    let path = Path::new(&record.worktree_path);
+    if !path.is_dir() {
+        bail!("worktree {} is missing; cannot reopen thread {id}", path.display());
+    }
+    let created = herdr.workspace_create(path, &record.title, false)?;
+    thread::update(project, id, |t| {
+        t.plain_workspace = true;
+        t.repo_workspace.clear();
+        t.cwd = t.worktree_path.clone();
+        t.workspace_id = created.workspace_id;
+        t.tab_id = created.tab_id;
+        t.pane_id = created.pane_id;
+    })
 }
 
 /// The thread directory, the git exclude and `brief.md`, on the thread's own
@@ -452,13 +465,12 @@ pub fn restart(ctx: &Ctx, slug: &str, id: &str, profile: Option<&str>) -> Result
         RestartPlan::Create => return place_and_brief(ctx, &project, &view, id, true),
         RestartPlan::ReusePane => {}
         RestartPlan::Reopen => match record.kind {
+            Kind::Worktree if !record.is_remote() => {
+                open_local_worktree(&project, &view.herdr, id)?;
+            }
             Kind::Worktree => {
                 let (created, path, cwd) = view.herdr.on_machine(&record.machine).worktree_open(&record.repo, &record.worktree_path, &record.title)?;
-                let repo_workspace = if record.is_remote() { String::new() } else { repo_space(&view.herdr, &record.repo) };
                 thread::update(&project, id, |t| {
-                    if !repo_workspace.is_empty() {
-                        t.repo_workspace = repo_workspace;
-                    }
                     t.worktree_path = path;
                     t.cwd = cwd;
                     t.workspace_id = created.workspace_id;
@@ -978,6 +990,13 @@ pub fn remove_worktree(ctx: &Ctx, project: &Project, record: &Thread, view: Opti
     if let Some(view) = view {
         let (_, panes) = lists_for(view, record)?;
         if let Some(workspace) = own_workspace(record, &panes) {
+            if record.plain_workspace && !record.is_remote() {
+                // Git refuses dirty worktrees. Close the Space only after a
+                // successful removal; a refused removal keeps the pane alive.
+                git(ctx.runner, &record.repo, &["worktree", "remove", &record.worktree_path], Duration::from_secs(20))?;
+                view.herdr.call(&["workspace", "close", &workspace], crate::herdr::CALL_TIMEOUT)?;
+                return Ok(Removal::Removed);
+            }
             return view.herdr.on_machine(&record.machine).worktree_remove(&workspace).map(|_| Removal::Removed).map_err(|error| anyhow::anyhow!("{error}"));
         }
     }
