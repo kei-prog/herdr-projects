@@ -234,7 +234,7 @@ fn place_and_brief(ctx: &Ctx, project: &Project, view: &SessionView, id: &str, r
                 t.plain_workspace = true;
                 t.repo_workspace.clear();
             })?;
-            open_local_worktree(project, &view.herdr, id)?
+            open_local_worktree(project, view, id)?
         }
         Kind::Tab | Kind::Checkout => place_tab(project, view, &record)?,
         Kind::Adopted => bail!("an adopted thread is not placed by the binary"),
@@ -243,22 +243,13 @@ fn place_and_brief(ctx: &Ctx, project: &Project, view: &SessionView, id: &str, r
     finish_placement(project, view, id)
 }
 
-/// Plain Spaces follow project ordering instead of Herdr's repo grouping.
-fn open_local_worktree(project: &Project, herdr: &Herdr, id: &str) -> Result<Thread> {
+/// Open the isolated checkout as a tab in the project's workspace.
+fn open_local_worktree(project: &Project, view: &SessionView, id: &str) -> Result<Thread> {
     let record = thread::load(project, id)?;
-    let path = Path::new(&record.worktree_path);
-    if !path.is_dir() {
-        bail!("worktree {} is missing; cannot reopen thread {id}", path.display());
+    if !Path::new(&record.worktree_path).is_dir() {
+        bail!("worktree {} is missing; cannot reopen thread {id}", record.worktree_path);
     }
-    let created = herdr.workspace_create(path, &record.title, false)?;
-    thread::update(project, id, |t| {
-        t.plain_workspace = true;
-        t.repo_workspace.clear();
-        t.cwd = t.worktree_path.clone();
-        t.workspace_id = created.workspace_id;
-        t.tab_id = created.tab_id;
-        t.pane_id = created.pane_id;
-    })
+    place_tab(project, view, &record)
 }
 
 /// The thread directory, the git exclude and `brief.md`, on the thread's own
@@ -285,7 +276,9 @@ fn place_tab(project: &Project, view: &SessionView, record: &Thread) -> Result<T
     if workspace.is_none() && !view.agents.iter().any(|a| coordinator::is_coordinator(&coordinator, a)) {
         bail!("the project's workspace is not open; run `open {}` first", project.slug);
     }
-    let folder = if record.kind == Kind::Checkout {
+    let folder = if record.kind == Kind::Worktree {
+        std::path::PathBuf::from(&record.worktree_path)
+    } else if record.kind == Kind::Checkout {
         std::path::PathBuf::from(&record.repo)
     } else {
         let folder = project.dir().join("threads").join(&record.id);
@@ -302,14 +295,24 @@ fn place_tab(project: &Project, view: &SessionView, record: &Thread) -> Result<T
         // opens the project's own.
         None => {
             let (settings, _) = project.read_project_md()?;
-            let created = view.herdr.workspace_create(&folder, &crate::project::home_label(&settings.name, &project.slug), false)?;
-            let _ = view.herdr.call(&["tab", "rename", &created.tab_id, &record.title], crate::herdr::CALL_TIMEOUT);
-            created
+            let home = if record.kind == Kind::Worktree { project.canonical_dir() } else { folder.clone() };
+            let created = view.herdr.workspace_create(&home, &crate::project::home_label(&settings.name, &project.slug), false)?;
+            if record.kind == Kind::Worktree {
+                view.herdr.tab_create(&created.workspace_id, &folder, &record.title, false)?
+            } else {
+                let _ = view.herdr.call(&["tab", "rename", &created.tab_id, &record.title], crate::herdr::CALL_TIMEOUT);
+                created
+            }
         }
     };
     let cwd = view.herdr.pane_cwd(&created.pane_id).unwrap_or_default();
     let cwd = if cwd.is_empty() { folder.to_string_lossy().into_owned() } else { cwd };
     thread::update(project, &record.id, |t| {
+        if record.kind == Kind::Worktree {
+            t.plain_workspace = true;
+            t.worktree_tab = true;
+            t.repo_workspace.clear();
+        }
         t.cwd = cwd;
         t.workspace_id = created.workspace_id;
         t.tab_id = created.tab_id;
@@ -466,7 +469,7 @@ pub fn restart(ctx: &Ctx, slug: &str, id: &str, profile: Option<&str>) -> Result
         RestartPlan::ReusePane => {}
         RestartPlan::Reopen => match record.kind {
             Kind::Worktree if !record.is_remote() => {
-                open_local_worktree(&project, &view.herdr, id)?;
+                open_local_worktree(&project, &view, id)?;
             }
             Kind::Worktree => {
                 let (created, path, cwd) = view.herdr.on_machine(&record.machine).worktree_open(&record.repo, &record.worktree_path, &record.title)?;
@@ -976,6 +979,22 @@ pub fn remove_worktree(ctx: &Ctx, project: &Project, record: &Thread, view: Opti
         bail!("{} has no recorded worktree", record.id);
     }
     let _ = project;
+    if record.worktree_tab && !record.is_remote() {
+        let gone = worktree_gone(record);
+        if gone {
+            let _ = git(ctx.runner, &record.repo, &["worktree", "prune"], GIT_TIMEOUT);
+        } else {
+            git(ctx.runner, &record.repo, &["worktree", "remove", &record.worktree_path], Duration::from_secs(20))?;
+        }
+        if let Some(view) = view
+            && view.panes.iter().any(|p| p.workspace_id == record.workspace_id
+                && p.tab_id == record.tab_id && p.pane_id == record.pane_id
+                && Path::new(&p.cwd).starts_with(&record.worktree_path))
+        {
+            view.herdr.call(&["tab", "close", &record.tab_id], crate::herdr::CALL_TIMEOUT)?;
+        }
+        return Ok(if gone { Removal::AlreadyGone("thread tab cleaned up".into()) } else { Removal::Removed });
+    }
     if worktree_gone(record) {
         let _ = git(ctx.runner, &record.repo, &["worktree", "prune"], GIT_TIMEOUT);
         let closed = match view.and_then(|v| own_workspace(record, &v.panes).map(|w| (v, w))) {

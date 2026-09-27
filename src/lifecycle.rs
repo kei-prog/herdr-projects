@@ -45,7 +45,7 @@ fn close_workspaces(project: &Project, view: &SessionView) -> Vec<String> {
         Err(error) => notes.push(format!("could not close {what}: {error}")),
     };
     let mut done = Vec::new();
-    for t in thread::list(project).iter().filter(|t| t.status != thread::Status::Resolved && !t.is_remote() && t.kind == thread::Kind::Worktree) {
+    for t in thread::list(project).iter().filter(|t| t.status != thread::Status::Resolved && !t.is_remote() && !t.worktree_tab && t.kind == thread::Kind::Worktree) {
         let workspace = view.panes.iter().find(|p| !t.worktree_path.is_empty() && std::path::Path::new(&p.cwd).starts_with(&t.worktree_path)).map(|p| p.workspace_id.clone());
         if let Some(workspace) = workspace
             && !done.contains(&workspace)

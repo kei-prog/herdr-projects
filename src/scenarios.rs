@@ -156,12 +156,12 @@ fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() 
     world.runner.on("worktree add", ok(""));
     world.runner.on("rev-parse --git-path", fail(1, "not a repo"));
     world.runner.on(
-        "workspace create",
+        "tab create",
         ok(&format!(
-            r#"{{"result":{{"root_pane":{{"workspace_id":"w2","tab_id":"w2:t1","pane_id":"w2:p1","cwd":"{wt}"}},"worktree":{{"path":"{wt}"}}}}}}"#
+            r#"{{"result":{{"root_pane":{{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","cwd":"{wt}"}},"worktree":{{"path":"{wt}"}}}}}}"#
         )),
     );
-    world.runner.on("agent start", ok(r#"{"result":{"agent":{"pane_id":"w2:p1","tab_id":"w2:t1","workspace_id":"w2"}}}"#));
+    world.runner.on("agent start", ok(r#"{"result":{"agent":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1"}}}"#));
     world.runner.on("agent prompt", ok(r#"{"result":{}}"#));
 
     let ctx = world.ctx();
@@ -186,6 +186,10 @@ fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() 
     assert_eq!(world.runner.count("agent start"), 0);
     assert_eq!(started.status, Status::Open);
     assert!(started.plain_workspace);
+    assert!(started.worktree_tab);
+    assert_eq!(started.workspace_id, "w1");
+    assert_eq!(world.runner.count("tab create --workspace w1"), 1);
+    assert_eq!(world.runner.count("workspace create"), 0);
     assert!(started.repo_workspace.is_empty());
     assert_eq!(world.runner.count("worktree create"), 0);
     assert_eq!(world.runner.count("worktree add -b hp/demo/t-0001-fix-it"), 1);
@@ -199,12 +203,12 @@ fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() 
     assert!(brief.contains("# Project instructions"));
     // The hostile title reaches herdr as one argument, unchanged.
     let calls = world.runner.calls.borrow();
-    let create = calls.iter().find(|c| c.display().contains("workspace create")).unwrap();
+    let create = calls.iter().find(|c| c.display().contains("tab create")).unwrap();
     assert!(create.args.contains(&"Fix $(it)".to_string()));
     drop(calls);
 
     // Tick 1: the pane is at a shell prompt: start, do not prompt.
-    *world.panes.borrow_mut() = format!("[{},{}]", world.coordinator_pane(&project), pane_json("w2", "w2:t1", "w2:p1", &wt));
+    *world.panes.borrow_mut() = format!("[{},{}]", world.coordinator_pane(&project), pane_json("w1", "w1:t2", "w1:p2", &wt));
     assert!(ticker::tick_project(&ctx, &project).unwrap());
     assert_eq!(world.runner.count("agent start"), 1);
     assert_eq!(world.runner.count("agent prompt"), 0);
@@ -216,7 +220,7 @@ fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() 
     drop(calls);
 
     // Tick 2: the agent is ready: prompt once, no second start.
-    *world.agents.borrow_mut() = format!("[{}]", agent_json("w2", "w2:t1", "w2:p1", &wt, "hp-demo-t-0001", "idle"));
+    *world.agents.borrow_mut() = format!("[{}]", agent_json("w1", "w1:t2", "w1:p2", &wt, "hp-demo-t-0001", "idle"));
     assert!(ticker::tick_project(&ctx, &project).unwrap());
     assert_eq!(world.runner.count("agent start"), 1);
     assert_eq!(world.runner.count("agent prompt"), 1);
@@ -231,7 +235,7 @@ fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() 
     assert!(inbox::unhandled(&project).is_empty());
 
     // Tick 3: nothing more to deliver.
-    *world.agents.borrow_mut() = format!("[{}]", agent_json("w2", "w2:t1", "w2:p1", &wt, "hp-demo-t-0001", "working"));
+    *world.agents.borrow_mut() = format!("[{}]", agent_json("w1", "w1:t2", "w1:p2", &wt, "hp-demo-t-0001", "working"));
     assert!(ticker::tick_project(&ctx, &project).unwrap());
     assert_eq!(world.runner.count("agent prompt"), 1);
     assert!(inbox::unhandled(&project).is_empty());
@@ -2391,7 +2395,7 @@ fn thread_brief_delivers_a_pending_brief_once_and_only_to_a_ready_agent() {
 }
 
 #[test]
-fn local_worktree_reopens_as_a_plain_space_and_keeps_legacy_records_readable() {
+fn local_worktree_reopens_in_project_tab_and_keeps_legacy_records_readable() {
     for plain in [false, true] {
         let world = World::new();
         let project = world.project("demo", "a.sock");
@@ -2403,22 +2407,25 @@ fn local_worktree_reopens_as_a_plain_space_and_keeps_legacy_records_readable() {
         });
         std::fs::write(thread::task_path(&project, "t-0001"), "The task.").unwrap();
         world.runner.on("rev-parse --git-path", fail(1, "not a repo"));
-        world.runner.on("workspace create", ok(r#"{"result":{"root_pane":{"workspace_id":"w3","tab_id":"w3:t1","pane_id":"w3:p1"}}}"#));
+        *world.panes.borrow_mut() = format!("[{}]", world.coordinator_pane(&project));
+        world.runner.on("tab create --workspace w1", ok(r#"{"result":{"root_pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}"#));
         let t = threads::restart(&world.ctx(), "demo", "t-0001", None).unwrap();
         assert!(t.plain_workspace);
         assert!(t.repo_workspace.is_empty());
-        assert_eq!(t.workspace_id, "w3");
+        assert_eq!(t.workspace_id, "w1");
         assert_eq!(t.worktree_path, worktree.to_string_lossy());
         assert_eq!(world.runner.count("worktree open"), 0);
         assert_eq!(world.runner.count("worktree add"), 0);
-        assert_eq!(world.runner.count("workspace create"), 1);
+        assert_eq!(world.runner.count("workspace create"), 0);
+        assert!(t.worktree_tab);
+        assert_eq!(world.runner.count("tab create --workspace w1"), 1);
     }
 }
 
 #[test]
 fn plain_worktree_removal_preserves_dirty_checkout_and_closes_only_after_git_succeeds() {
     use crate::runner::{RealRunner, Runner};
-    for dirty in [true, false] {
+    for (dirty, tab) in [(true, false), (false, false), (true, true), (false, true)] {
         let world = World::new();
         let project = world.project("demo", "a.sock");
         let repo = world.home.path().join("repo");
@@ -2437,16 +2444,19 @@ fn plain_worktree_removal_preserves_dirty_checkout_and_closes_only_after_git_suc
         let t = world.thread(&project, &path, |t| {
             t.repo = repo.to_string_lossy().into_owned();
             t.plain_workspace = true;
+            t.worktree_tab = tab;
         });
         *world.panes.borrow_mut() = format!("[{}]", pane_json("w2", "w2:t1", "w2:p1", path.to_str().unwrap()));
         world.runner.on_fn(|cmd| cmd.program == "git", |cmd| RealRunner.run(cmd));
+        world.runner.on("tab close", ok(r#"{"result":{}}"#));
         world.runner.on("workspace close", ok(r#"{"result":{}}"#));
         let ctx = world.ctx();
         let view = threads::session_view(&ctx, &project).unwrap();
         let result = threads::remove_worktree(&ctx, &project, &t, Some(&view));
         assert_eq!(result.is_ok(), !dirty);
         assert_eq!(path.exists(), dirty);
-        assert_eq!(world.runner.count("workspace close w2"), usize::from(!dirty));
+        assert_eq!(world.runner.count("workspace close w2"), usize::from(!dirty && !tab));
+        assert_eq!(world.runner.count("tab close w2:t1"), usize::from(!dirty && tab));
         assert_eq!(world.runner.count("worktree remove --workspace"), 0);
         if dirty {
             assert_eq!(std::fs::read_to_string(path.join("uncommitted.txt")).unwrap(), "keep me");
@@ -2467,7 +2477,7 @@ fn plain_worktree_does_not_acquire_another_projects_primary_space() {
 }
 
 #[test]
-fn projects_sharing_a_repo_create_separate_worktrees_and_retry_failed_space_creation() {
+fn projects_sharing_a_repo_create_separate_worktrees_and_retry_failed_tab_creation() {
     use crate::runner::{RealRunner, Runner};
     let world = World::new();
     let repo = world.home.path().join("repo");
@@ -2478,15 +2488,19 @@ fn projects_sharing_a_repo_create_separate_worktrees_and_retry_failed_space_crea
     }
     world.runner.on_fn(|cmd| cmd.program == "git", |cmd| RealRunner.run(cmd));
     let attempts = Rc::new(RefCell::new(0));
-    world.runner.on_fn(|cmd| cmd.display().contains("workspace create"), move |_| {
+    world.runner.on_fn(|cmd| cmd.display().contains("tab create"), move |cmd| {
         *attempts.borrow_mut() += 1;
         let n = *attempts.borrow();
         if n == 1 { return Ok(fail(1, "temporarily unavailable")); }
-        Ok(ok(&format!(r#"{{"result":{{"root_pane":{{"workspace_id":"w{n}","tab_id":"w{n}:t1","pane_id":"w{n}:p1"}}}}}}"#)))
+        let workspace = &cmd.args[3];
+        Ok(ok(&format!(r#"{{"result":{{"root_pane":{{"workspace_id":"{workspace}","tab_id":"{workspace}:t2","pane_id":"{workspace}:p2"}}}}}}"#)))
     });
     let mut started = Vec::new();
     for slug in ["alpha", "beta"] {
         let project = world.project(slug, "a.sock");
+        let workspace = if slug == "alpha" { "w1" } else { "w9" };
+        project.update_coordinator(|c| { c.workspace_id = workspace.into(); }).unwrap();
+        *world.panes.borrow_mut() = format!("[{}]", pane_json(workspace, &format!("{workspace}:t1"), &format!("{workspace}:p1"), &project.canonical_dir().to_string_lossy()));
         let result = threads::start(&world.ctx(), slug, StartArgs {
             title: "Same task".into(), repo: Some(repo.to_string_lossy().into_owned()),
             machine: None, profile: None, kind: None, base: Some("HEAD".into()), task: "The task.".into(),
@@ -2499,6 +2513,8 @@ fn projects_sharing_a_repo_create_separate_worktrees_and_retry_failed_space_crea
             threads::restart(&world.ctx(), slug, "t-0001", None).unwrap()
         } else { result.unwrap() };
         assert!(t.plain_workspace);
+        assert!(t.worktree_tab);
+        assert_eq!(t.workspace_id, workspace);
         assert!(t.repo_workspace.is_empty());
         assert!(Path::new(&t.thread_dir).join("brief.md").is_file());
         started.push(t);
@@ -2508,4 +2524,26 @@ fn projects_sharing_a_repo_create_separate_worktrees_and_retry_failed_space_crea
     assert_ne!(started[0].branch, started[1].branch);
     assert_eq!(world.runner.count("worktree add"), 2);
     assert_eq!(world.runner.count("worktree create"), 0);
+}
+
+#[test]
+fn missing_worktree_closes_only_its_project_tab() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    let path = world.home.path().join("gone");
+    let t = world.thread(&project, &path, |t| {
+        t.plain_workspace = true;
+        t.worktree_tab = true;
+        t.workspace_id = "w1".into();
+        t.tab_id = "w1:t2".into();
+        t.pane_id = "w1:p2".into();
+    });
+    *world.panes.borrow_mut() = format!("[{},{}]", world.coordinator_pane(&project), pane_json("w1", "w1:t2", "w1:p2", path.to_str().unwrap()));
+    world.runner.on("worktree prune", ok(""));
+    world.runner.on("tab close w1:t2", ok(r#"{"result":{}}"#));
+    let ctx = world.ctx();
+    let view = threads::session_view(&ctx, &project).unwrap();
+    assert!(matches!(threads::remove_worktree(&ctx, &project, &t, Some(&view)).unwrap(), threads::Removal::AlreadyGone(_)));
+    assert_eq!(world.runner.count("tab close w1:t2"), 1);
+    assert_eq!(world.runner.count("workspace close"), 0);
 }

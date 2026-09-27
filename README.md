@@ -115,12 +115,12 @@ No. A project is a folder on your machine, the plugin talks to your local Herdr 
 
 ### How are local worktree threads grouped?
 
-Local worktree threads open as ordinary Herdr Spaces so each stays with its own
-project, even when multiple projects use the same repository. Git worktrees and
-branches remain isolated; checkouts live under `<projects-root>/.worktrees/<slug>/<thread-id>`.
-These Spaces do not use Herdr's repository worktree grouping. Existing open
-threads keep their placement; reopening a closed local thread uses the new
-placement. Remote threads continue to use Herdr's worktree Spaces.
+Local worktree threads open as tabs inside their project's workspace.
+Git worktrees and branches remain isolated; checkouts live under
+`<projects-root>/.worktrees/<slug>/<thread-id>`. Resolving a thread closes only
+its tab, preserving the coordinator and sibling threads. Existing open
+threads keep their placement; reopening a closed local thread uses a project
+tab. Remote threads continue to use Herdr's worktree Spaces.
 
 ### Will it touch my branches or worktrees on its own?
 
